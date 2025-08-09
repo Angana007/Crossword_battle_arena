@@ -2,12 +2,11 @@ export type Clue = {
   number: number;
   clue: string;
   answer: string;
-  start: [number, number]; // [row, col], both 0-indexed
+  start: [number, number]; // [row, col], 0-indexed
   direction: "across" | "down";
 };
-
-// ✅ unified property name for puzzle width/height
 export const gridSize = 10;
+export const puzzle2Size = 10;
 
 export const allClues: Clue[] = [
   // Across
