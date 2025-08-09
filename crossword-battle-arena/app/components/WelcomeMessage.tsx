@@ -1,24 +1,36 @@
 "use client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useState, useRef } from "react";
 import { useUser } from "@clerk/nextjs";
 import { firestore } from "@/lib/FirebaseClient";
 import { doc, getDoc } from "firebase/firestore";
-import { ref, set } from "firebase/database";
-import { rtdb } from "@/lib/FirebaseClient";
+import { sendAiChatMessage } from "@/lib/sendAiChatMessage";
 
 export default function WelcomeMessage({ gameId }: { gameId: string }) {
   const { user } = useUser();
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<{ games_played: number; games_won: number; games_lost: number } | null>(null);
   const [loading, setLoading] = useState(true);
+  const sentRef = useRef(false);
 
+  // Load player stats from Firestore
   useEffect(() => {
     async function loadStats() {
       if (!user) return;
       try {
         const snap = await getDoc(doc(firestore, "user_stats", user.id));
-        setStats(snap.exists() ? snap.data() : {});
+        if (snap.exists()) {
+          const data = snap.data();
+          setStats({
+            games_played: data.games_played || 0,
+            games_won: data.games_won || 0,
+            games_lost: data.games_lost || 0,
+          });
+        } else {
+          setStats({ games_played: 0, games_won: 0, games_lost: 0 });
+        }
       } catch (err) {
         console.error("Failed to fetch stats:", err);
+        setStats({ games_played: 0, games_won: 0, games_lost: 0 });
       } finally {
         setLoading(false);
       }
@@ -26,58 +38,64 @@ export default function WelcomeMessage({ gameId }: { gameId: string }) {
     loadStats();
   }, [user]);
 
-  // Send AI welcome-back message to chat
+  // Send AI welcome-back message only once
   useEffect(() => {
-    async function sendAiWelcome() {
-      if (!user) return;
-      try {
-        const res = await fetch("/api/ai-chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            eventType: "welcome_back",
-            playerName: user.firstName || "Player",
-            stats,
-          }),
-        });
-        const { message } = await res.json();
-        // Push message into game chat
-        await set(
-          ref(rtdb, `chat_messages/${gameId}/${Date.now()}_${Math.floor(Math.random() * 10000)}`),
-          {
-            sender: "ai",
-            message,
-            timestamp: Date.now(),
-          }
-        );
-      } catch (err) {
-        console.error("AI welcome message error:", err);
-      }
+    async function sendWelcome() {
+      if (!user || !stats || sentRef.current) return;
+      sentRef.current = true;
+      await sendAiChatMessage({
+        gameId,
+        eventType: "welcome_back",
+        playerName: user.firstName || "Player",
+        gameState: {},
+        stats,
+      });
     }
-
-    if (stats && user) {
-      sendAiWelcome();
-    }
+    sendWelcome();
   }, [stats, user, gameId]);
 
-  if (loading) return <div>Loading welcome message...</div>;
+  if (loading) {
+    return (
+      <div style={{ padding: "1rem", fontStyle: "italic" }}>
+        Loading welcome message...
+      </div>
+    );
+  }
 
+  if (!user || !stats) return null;
+
+  // UI Layout
   return (
-    <div style={{
-      background: "#f4f4f4",
-      padding: "1rem",
-      borderRadius: "8px",
-      marginBottom: "1rem",
-      boxShadow: "0px 2px 4px rgba(0,0,0,0.1)"
-    }}>
-      <h2>
-        👋 Welcome back, {user?.firstName}!
-      </h2>
-      {stats && (
-        <p style={{ margin: 0 }}>
-          Games played: {stats.games_played || 0} | Wins: {stats.games_won || 0} | Losses: {stats.games_lost || 0}
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "1rem",
+        background: "#f4f4f4",
+        padding: "1rem",
+        borderRadius: "8px",
+        marginBottom: "1rem",
+        boxShadow: "0px 2px 4px rgba(0,0,0,0.1)",
+      }}
+    >
+      <img
+        src={user.imageUrl}
+        alt={user.fullName || ""}
+        style={{
+          width: 50,
+          height: 50,
+          borderRadius: "50%",
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ flex: 1 }}>
+        <h2 style={{ margin: "0 0 0.25rem" }}>
+          👋 Welcome back, {user.firstName}!
+        </h2>
+        <p style={{ margin: 0, fontSize: "0.9rem", color: "#444" }}>
+          Games played: {stats.games_played} | Wins: {stats.games_won} | Losses: {stats.games_lost}
         </p>
-      )}
+      </div>
     </div>
   );
 }
