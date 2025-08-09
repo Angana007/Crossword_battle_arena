@@ -1,27 +1,49 @@
-// /app/game/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
-  SignedOut,
-  SignInButton,
-  SignOutButton,
-  UserButton,
   useUser,
   RedirectToSignIn,
+  UserButton,
+  SignOutButton
 } from "@clerk/nextjs";
-import { rtdb } from "@/lib/FirebaseClient";
-import { ref, onValue, set, get } from "firebase/database";
 import Link from "next/link";
+import { rtdb } from "@/lib/FirebaseClient";
+import { ref, onValue, set, get, update } from "firebase/database";
 import GameBoard from "../components/GameBoard";
 import ChatBox from "../components/ChatBox";
+import { allClues, puzzle1Size } from "@/app/puzzles/puzzle1";
+import { updateUserStats } from "@/lib/updateUserStats";
+
+// Helper to check if game over
+function checkGameOver(grid: string[]): boolean {
+  return allClues.every(clue => {
+    const [sr, sc] = clue.start;
+    for (let i = 0; i < clue.answer.length; i++) {
+      const r = sr + (clue.direction === "down" ? i : 0);
+      const c = sc + (clue.direction === "across" ? i : 0);
+      if (grid[r * puzzle1Size + c] !== clue.answer[i]) return false;
+    }
+    return true;
+  });
+}
+
+// Helper for random string mistakes
+function randomString(len: number) {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let s = "";
+  for (let i = 0; i < len; i++) {
+    s += letters[Math.floor(Math.random() * letters.length)];
+  }
+  return s;
+}
 
 export default function GamePage() {
-  const { isSignedIn, user, isLoaded } = useUser();
+  const { isSignedIn, isLoaded, user } = useUser();
   const [gameId] = useState("testgame1");
   const [scores, setScores] = useState({ player: 0, ai: 0 });
 
-  // Listen for real-time score updates
+  // 📊 Listen for score updates
   useEffect(() => {
     const scoresRef = ref(rtdb, `games/${gameId}`);
     const unsub = onValue(scoresRef, (snap) => {
@@ -36,46 +58,98 @@ export default function GamePage() {
     return () => unsub();
   }, [gameId]);
 
-  // Simulate AI moves every 5 seconds
+  // 🤖 AI Opponent Full Word Logic
   useEffect(() => {
     if (!isSignedIn) return;
 
-    const interval = setInterval(async () => {
+    let cluePool = [...allClues]; // copy clues
+    let stopAI = false;
+
+    const scheduleNext = () => {
+      if (stopAI || cluePool.length === 0) return;
+      const delay = 3000 + Math.random() * 5000; // 3–8s
+      setTimeout(playNext, delay);
+    };
+
+    const playNext = async () => {
+      if (stopAI || cluePool.length === 0) return;
+
+      const clue = cluePool.shift()!;
+      // 30% chance AI skips the word
+      if (Math.random() < 0.3) {
+        console.log(`AI skipped ${clue.answer}`);
+        return scheduleNext();
+      }
+      // 20% chance AI makes mistake
+      const attempt =
+        Math.random() < 0.2
+          ? randomString(clue.answer.length)
+          : clue.answer;
+
       const snap = await get(ref(rtdb, `games/${gameId}/grid`));
-      const current = snap.exists() ? snap.val() : Array(100).fill("");
-      const emptyIndices = current
-        .map((val: string, idx: number) => (val === "" ? idx : null))
-        .filter((v: number | null) => v !== null);
+      const current = snap.exists()
+        ? snap.val()
+        : Array(puzzle1Size * puzzle1Size).fill("");
 
-      if (emptyIndices.length === 0) return; // Grid full
-
-      const randomIndex =
-        emptyIndices[Math.floor(Math.random() * emptyIndices.length)];
-      current[randomIndex] = String.fromCharCode(
-        65 + Math.floor(Math.random() * 26)
-      );
+      const [sr, sc] = clue.start;
+      for (let i = 0; i < clue.answer.length; i++) {
+        const r = sr + (clue.direction === "down" ? i : 0);
+        const c = sc + (clue.direction === "across" ? i : 0);
+        current[r * puzzle1Size + c] = attempt[i];
+      }
 
       await set(ref(rtdb, `games/${gameId}/grid`), current);
 
-      // Update AI score
-      const scoreSnap = await get(ref(rtdb, `games/${gameId}/ai_score`));
-      const aiScore = scoreSnap.exists() ? scoreSnap.val() + 1 : 1;
-      await set(ref(rtdb, `games/${gameId}/ai_score`), aiScore);
-    }, 5000);
+      // Mark solved cells if correct
+      if (attempt === clue.answer) {
+        const solvedCells: { [cell: number]: string } = {};
+        for (let i = 0; i < clue.answer.length; i++) {
+          const r = sr + (clue.direction === "down" ? i : 0);
+          const c = sc + (clue.direction === "across" ? i : 0);
+          solvedCells[r * puzzle1Size + c] = "ai";
+        }
+        await update(ref(rtdb, `games/${gameId}/solved_words`), solvedCells);
 
-    return () => clearInterval(interval);
-  }, [gameId, isSignedIn]);
+        // Increment AI score
+        await set(
+          ref(rtdb, `games/${gameId}/ai_score`),
+          (scores.ai || 0) + 1
+        );
+      }
 
-  // Loading state
+      // ✅ Check if AI just won the game
+      if (checkGameOver(current)) {
+        stopAI = true;
+        await set(ref(rtdb, `games/${gameId}/game_status`), "completed");
+        await set(ref(rtdb, `games/${gameId}/winner`), "ai");
+
+        // Update player stats for loss
+        try {
+          await updateUserStats(user!.id, false);
+        } catch (err) {
+          console.error("Failed to update stats:", err);
+        }
+        return;
+      }
+
+      // Keep playing
+      scheduleNext();
+    };
+
+    scheduleNext();
+    return () => {
+      stopAI = true;
+    };
+  }, [gameId, isSignedIn, scores.ai, user]);
+
+  // 🕒 Loading state
   if (!isLoaded) return <div>Loading...</div>;
-
-  // Conditional render if not signed in
-  if (!isSignedIn) {
-    return <RedirectToSignIn redirectUrl="/game" />; // optional redirectUrl
-  }
+  // 🔐 Redirect if not signed in
+  if (!isSignedIn) return <RedirectToSignIn redirectUrl="/game" />;
 
   return (
     <main style={{ padding: "1rem" }}>
+      {/* Header */}
       <header
         style={{
           marginBottom: "1rem",
@@ -99,18 +173,20 @@ export default function GamePage() {
         </div>
       </header>
 
+      {/* Scoreboard */}
       <div style={{ marginBottom: "1rem" }}>
         <p>
           Scores — You: {scores.player} | AI: {scores.ai}
         </p>
       </div>
 
-      {/* Game grid */}
+      {/* Game grid component */}
       <GameBoard gameId={gameId} userId={user!.id} />
 
       {/* Chat UI */}
       <ChatBox gameId={gameId} userName={user?.fullName || "Player"} />
 
+      {/* Back button */}
       <div style={{ marginTop: "1.5rem" }}>
         <Link href="/">
           <button style={{ padding: "0.5rem 1rem" }}>Back to Home</button>
